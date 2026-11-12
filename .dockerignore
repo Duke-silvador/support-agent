@@ -1,0 +1,22 @@
+# build context hygiene
+.venv/
+venv/
+.lockenv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.git/
+.env
+.env.*
+!.env.example
+*.log
+.build.log
+htmlcov/
+.coverage
+coverage.xml
+sbom*.json
+*.spdx.json
+examples/

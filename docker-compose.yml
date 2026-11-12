@@ -1,0 +1,211 @@
+name: support-agent
+
+# ---- shared settings ------------------------------------------------------
+x-postgres-credentials: &postgres-credentials
+  POSTGRES_USER: ${POSTGRES_USER:-support}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-support_local_pw}
+  POSTGRES_DB: ${POSTGRES_DB:-support}
+  # Least-privilege runtime role (DML only) and the DDL-capable migration role.
+  APP_DB_USER: ${APP_DB_USER:-support_app}
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:-support_app_local_pw}
+  MIGRATE_DB_USER: ${MIGRATE_DB_USER:-support_migrator}
+  MIGRATE_DB_PASSWORD: ${MIGRATE_DB_PASSWORD:-support_migrator_local_pw}
+
+x-app-environment: &app-environment
+  ENVIRONMENT: ${ENVIRONMENT:-local}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  # The app connects as the DML-only role; migrations use MIGRATE_DATABASE_URL.
+  DATABASE_URL: postgresql+asyncpg://${APP_DB_USER:-support_app}:${APP_DB_PASSWORD:-support_app_local_pw}@postgres:5432/${POSTGRES_DB:-support}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-support_redis_local_pw}@redis:6379/0
+  LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-fake}
+  LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+  EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # Local demo operator. Set real operator ids (and ENVIRONMENT=prod) in prod.
+  OPERATOR_IDS: ${OPERATOR_IDS:-operator-1}
+  ALLOW_ANON_OPERATORS: ${ALLOW_ANON_OPERATORS:-false}
+  RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-20}
+  RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+  CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-3600}
+  OTEL_SERVICE_NAME: support-agent
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  # `header` is the spoofable local stub; `oidc` validates bearer JWTs.
+  # Run `docker compose --profile auth up -d` and set AUTH_MODE=oidc to use it.
+  AUTH_MODE: ${AUTH_MODE:-header}
+  OIDC_ISSUER: ${OIDC_ISSUER:-http://keycloak:8080/realms/support-agent}
+  OIDC_AUDIENCE: ${OIDC_AUDIENCE:-support-agent-api}
+  OIDC_OPERATOR_ROLE: ${OIDC_OPERATOR_ROLE:-support-operator}
+  OUTBOX_POLL_SECONDS: ${OUTBOX_POLL_SECONDS:-2}
+  OUTBOX_MAX_ATTEMPTS: ${OUTBOX_MAX_ATTEMPTS:-5}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment: *postgres-credentials
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-support} -d ${POSTGRES_DB:-support}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    # `noeviction` keeps the limiter keys authoritative: under memory pressure
+    # writes fail (the limiter/health check fail closed) instead of silently
+    # dropping the counters that enforce cost limits.
+    command:
+      [
+        "redis-server",
+        "--save", "",
+        "--appendonly", "no",
+        "--maxmemory", "256mb",
+        "--maxmemory-policy", "noeviction",
+        "--requirepass", "${REDIS_PASSWORD:-support_redis_local_pw}",
+      ]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-support_redis_local_pw}
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.164.0
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector/config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # prometheus scrape
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI: http://localhost:16686
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      target: runtime
+    image: support-agent:local
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *app-environment
+      # Schema changes run as the migration role, never as the app role.
+      DATABASE_URL: postgresql+asyncpg://${MIGRATE_DB_USER:-support_migrator}:${MIGRATE_DB_PASSWORD:-support_migrator_local_pw}@postgres:5432/${POSTGRES_DB:-support}
+      MIGRATE_DATABASE_URL: postgresql+asyncpg://${MIGRATE_DB_USER:-support_migrator}:${MIGRATE_DB_PASSWORD:-support_migrator_local_pw}@postgres:5432/${POSTGRES_DB:-support}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      target: runtime
+    image: support-agent:local
+    environment:
+      <<: *app-environment
+      OTEL_ENABLED: ${OTEL_ENABLED:-true}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+  # Durable dispatch of approved escalations. Runs even if the API is down.
+  worker:
+    build:
+      context: .
+      target: runtime
+    image: support-agent:local
+    command: ["python", "-m", "support_agent.workers.outbox"]
+    environment:
+      <<: *app-environment
+      OTEL_ENABLED: ${OTEL_ENABLED:-true}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Local OIDC provider. Not started by default: `--profile auth`.
+  keycloak:
+    profiles: ["auth"]
+    image: quay.io/keycloak/keycloak:26.0.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_local_pw}
+      # Fixed public issuer so tokens minted from the browser and validated by
+      # the app container agree on `iss` (the app reaches Keycloak by service
+      # name; the mapping below is only for human/browser use).
+      KC_HOSTNAME: http://keycloak:8080
+      KC_HOSTNAME_STRICT: "false"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./deploy/keycloak/realm-support-agent.json:/opt/keycloak/data/import/realm-support-agent.json:ro
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q 'UP' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    image: support-agent:test
+    environment:
+      <<: *app-environment
+      OTEL_ENABLED: "false"
+      LOG_LEVEL: WARNING
+      # Include the integration suite by default in the test image.
+      RUN_INTEGRATION: "1"
+      # The suite verifies the role split (app role cannot DDL), so it needs the
+      # migration URL as well.
+      MIGRATE_DATABASE_URL: postgresql+asyncpg://${MIGRATE_DB_USER:-support_migrator}:${MIGRATE_DB_PASSWORD:-support_migrator_local_pw}@postgres:5432/${POSTGRES_DB:-support}
+    command: ["sh", "-c", "alembic upgrade head && pytest -q"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:

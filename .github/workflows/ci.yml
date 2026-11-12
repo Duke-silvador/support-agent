@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Tests import the package from `src/` (see [tool.pytest.ini_options].pythonpath)
+  # instead of building it: the installed dependency set then comes exclusively
+  # from the hashed lockfile.
+  PYTHONPATH: src
+  PIP_AUDIT_VERSION: "2.9.0"
+
+jobs:
+  lint:
+    name: lint + types + dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.lock
+      - name: install (hashed lockfile)
+        run: |
+          pip install --no-deps --require-hashes -r requirements-dev.lock
+          pip install "pip-audit==${PIP_AUDIT_VERSION}"
+      - name: ruff (lint)
+        run: ruff check .
+      - name: ruff (format)
+        run: ruff format --check .
+      - name: mypy
+        run: mypy
+      # Blocking: a known-vulnerable pinned dependency fails the build. The
+      # lockfile is fully pinned, so `--disable-pip` avoids a second resolution.
+      - name: dependency audit (blocking, runtime lock)
+        run: pip-audit --requirement requirements.lock --disable-pip --require-hashes --strict
+      - name: dependency audit (blocking, dev lock)
+        run: pip-audit --requirement requirements-dev.lock --disable-pip --require-hashes --strict
+
+  test:
+    name: unit + integration + evals
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: support
+          POSTGRES_PASSWORD: support
+          POSTGRES_DB: support
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U support"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      ENVIRONMENT: test
+      AUTH_MODE: header
+      # The suite runs as the DML-only role; migrations run as the schema owner.
+      DATABASE_URL: postgresql+asyncpg://support_app:support_app_ci_pw@localhost:5432/support
+      MIGRATE_DATABASE_URL: postgresql+asyncpg://support_migrator:support_migrator_ci_pw@localhost:5432/support
+      REDIS_URL: redis://localhost:6379/0
+      LLM_PROVIDER: fake
+      EMBEDDING_PROVIDER: fake
+      EMBEDDING_DIM: "1536"
+      OTEL_ENABLED: "false"
+      LOG_LEVEL: WARNING
+      POSTGRES_USER: support
+      POSTGRES_DB: support
+      APP_DB_USER: support_app
+      APP_DB_PASSWORD: support_app_ci_pw
+      MIGRATE_DB_USER: support_migrator
+      MIGRATE_DB_PASSWORD: support_migrator_ci_pw
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: install (hashed lockfile)
+        run: pip install --no-deps --require-hashes -r requirements-dev.lock
+      - name: create least-privilege roles (same script as compose)
+        # PGHOST points psql at the service container instead of a local socket.
+        run: PGHOST=localhost PGPASSWORD=support bash deploy/postgres/init/10-roles.sh
+      - name: migrations (as the schema-owning role)
+        run: alembic upgrade head
+      - name: unit tests
+        run: pytest -q -m "not integration"
+      - name: integration tests
+        run: pytest -q -m integration
+      - name: start API
+        run: |
+          uvicorn support_agent.api.app:app --host 127.0.0.1 --port 8000 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8000/health
+      - name: reset corpus and cache before evals
+        # Integration tests upload documents into the same database; evals need
+        # an isolated corpus (and a cold cache) to be reproducible.
+        run: |
+          psql "postgresql://support:support@localhost:5432/support" -v ON_ERROR_STOP=1 \
+            -c "TRUNCATE chunks, documents RESTART IDENTITY CASCADE;"
+          python -c "import redis; redis.Redis.from_url('redis://localhost:6379/0').flushdb()"
+      - name: behavioural evals
+        env:
+          EVAL_BASE_URL: http://127.0.0.1:8000
+        run: python -m evals.runner
+
+  image:
+    name: image scan + SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: build image
+        run: docker build -t support-agent:${{ github.sha }} .
+      # Blocking: HIGH/CRITICAL OS or library vulnerabilities fail the build.
+      # `ignore-unfixed` keeps the gate actionable (no fix published => no block).
+      - name: Trivy image scan (blocking)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: support-agent:${{ github.sha }}
+          version: v0.76.2
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+      - name: Trivy JSON report
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: support-agent:${{ github.sha }}
+          version: v0.76.2
+          format: json
+          output: trivy-image.json
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          vuln-type: os,library
+      - name: SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: support-agent:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: sbom-spdx-json
+          upload-artifact: true
+      - name: CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: support-agent:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          artifact-name: sbom-cyclonedx-json
+          upload-artifact: true
+      - name: upload scan report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: trivy-image-report
+          path: trivy-image.json
+          if-no-files-found: warn

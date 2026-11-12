@@ -1,0 +1,112 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "support-agent"
+version = "0.1.0"
+description = "Production-grade RAG support agent (FastAPI + pgvector + Redis + OTel)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "LicenseRef-Proprietary"
+
+dependencies = [
+  # FastAPI and the OpenTelemetry instrumentation are upgraded together: the
+  # 0.66b2 instrumentation line understands Starlette 1.x, while the old
+  # 0.50b0/1.29.0 pair only worked with Starlette 0.x and carried a known
+  # advisory (GHSA-xcq7-p3pf-p88h). Keep the three OTel packages in lockstep.
+  "fastapi>=0.162,<0.163",
+  "uvicorn[standard]>=0.32,<1.0",
+  "pydantic>=2.9,<3.0",
+  "pydantic-settings>=2.6,<3.0",
+  "sqlalchemy[asyncio]>=2.0.36,<2.1",
+  "asyncpg>=0.30,<0.31",
+  "alembic>=1.14,<2.0",
+  "pgvector>=0.3.6,<0.4",
+  "redis>=5.2,<7.0",
+  "httpx>=0.28,<0.29",
+  "python-multipart>=0.0.18,<0.1",
+  "pyyaml>=6.0,<7.0",
+  "openai>=1.60,<3.0",
+  "anthropic>=0.40,<1.0",
+  # OIDC bearer-token validation (RS256/ES256 via JWKS). `crypto` pulls
+  # `cryptography`, which is required for signature verification.
+  "pyjwt[crypto]>=2.9,<3.0",
+  # OpenTelemetry: api/sdk/exporter (1.45.2) and the instrumentation packages
+  # (0.66b2) must move together. This pair is compatible with Starlette 1.x.
+  "opentelemetry-api==1.45.2",
+  "opentelemetry-sdk==1.45.2",
+  "opentelemetry-exporter-otlp-proto-grpc==1.45.2",
+  "opentelemetry-instrumentation-fastapi==0.66b2",
+  "opentelemetry-instrumentation-httpx==0.66b2",
+  "opentelemetry-instrumentation-asyncpg==0.66b2",
+  "opentelemetry-instrumentation-redis==0.66b2",
+]
+
+[project.optional-dependencies]
+dev = [
+  # pytest 9 is required to clear PYSEC-2026-1845; the plugins below are the
+  # matching 9.x-compatible lines.
+  "pytest>=9.0.3,<10.0",
+  "pytest-asyncio>=1.4,<2.0",
+  "pytest-cov>=7.1,<8.0",
+  "fakeredis[lua]>=2.26,<3.0",
+  "ruff>=0.8,<1.0",
+  "mypy>=1.13,<2.0",
+  "types-pyyaml>=6.0,<7.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+support_agent = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests", "evals"]
+# Import the package from source so CI/dev never need to build a wheel; the
+# installed dependency set then comes exclusively from the hashed lockfile.
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "integration: needs postgres/redis (docker compose)",
+  "eval: behavioural evaluation cases",
+]
+filterwarnings = ["error::DeprecationWarning:support_agent.*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "evals"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "ASYNC", "S", "RUF"]
+ignore = ["S101"]  # asserts are fine in tests; src uses explicit raises
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+"evals/**" = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["support_agent"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["support_agent"]
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unreachable = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["pgvector.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "evals.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false

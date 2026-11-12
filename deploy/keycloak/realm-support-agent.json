@@ -1,0 +1,91 @@
+{
+  "realm": "support-agent",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "roles": {
+    "realm": [
+      {
+        "name": "support-user",
+        "description": "Default role for a support-agent caller"
+      },
+      {
+        "name": "support-operator",
+        "description": "May decide escalations and publish shared documents"
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "agent-user",
+      "enabled": true,
+      "email": "agent-user@example.test",
+      "emailVerified": true,
+      "firstName": "Agent",
+      "lastName": "User",
+      "credentials": [
+        { "type": "password", "value": "agent-user-local-pw", "temporary": false }
+      ],
+      "realmRoles": ["support-user"]
+    },
+    {
+      "username": "other-user",
+      "enabled": true,
+      "email": "other-user@example.test",
+      "emailVerified": true,
+      "firstName": "Other",
+      "lastName": "User",
+      "credentials": [
+        { "type": "password", "value": "other-user-local-pw", "temporary": false }
+      ],
+      "realmRoles": ["support-user"]
+    },
+    {
+      "username": "operator-1",
+      "enabled": true,
+      "email": "operator-1@example.test",
+      "emailVerified": true,
+      "firstName": "Operator",
+      "lastName": "One",
+      "credentials": [
+        { "type": "password", "value": "operator-1-local-pw", "temporary": false }
+      ],
+      "realmRoles": ["support-user", "support-operator"]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "support-agent-api",
+      "name": "Support Agent API",
+      "description": "Public client used for local password-grant tokens (never enable direct grants in production)",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "support-agent-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "support-agent-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ]
+}
