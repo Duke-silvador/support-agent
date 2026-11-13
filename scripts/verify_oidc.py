@@ -51,6 +51,16 @@ RUN = uuid.uuid4().hex[:8]
 RESULTS: list[tuple[str, bool]] = []
 
 
+def _unsigned_token() -> str:
+    """Forge an ``alg=none`` token at runtime (no literal JWT in the source)."""
+
+    def b64(data: dict[str, str]) -> str:
+        raw = json.dumps(data, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{b64({'alg': 'none'})}.{b64({'sub': 'attacker'})}."
+
+
 def check(name: str, condition: object, detail: str = "") -> bool:
     ok = bool(condition)
     RESULTS.append((name, ok))
@@ -195,7 +205,7 @@ async def phase_unauthenticated(client: httpx.AsyncClient) -> None:
 
     tampered = await client.get(
         "/documents/00000000-0000-0000-0000-000000000000",
-        headers=bearer("eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdHRhY2tlciJ9."),
+        headers=bearer(_unsigned_token()),
         timeout=30.0,
     )
     check("alg=none token is 401", tampered.status_code == 401, str(tampered.status_code))

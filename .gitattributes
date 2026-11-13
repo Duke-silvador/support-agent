@@ -1,0 +1,14 @@
+# Keep line endings consistent so the repo works the same on Windows, Linux and macOS.
+* text=auto eol=lf
+
+# Scripts and build files must always be LF (a CRLF breaks `#!/bin/sh` and make).
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+Makefile    text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# Binary files: never touch.
+*.png binary
+*.jpg binary
+*.zip binary

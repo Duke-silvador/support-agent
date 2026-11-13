@@ -54,6 +54,11 @@ curl http://localhost:8000/health
 | localhost:5433 | PostgreSQL (pgvector) |
 | localhost:6380 | Redis |
 
+Every published port (API, Postgres, Redis, Keycloak, Jaeger, OTel collector) is bound to
+`127.0.0.1`, so the demo is reachable from your own machine only. The compose passwords are
+public test values; **do not change these bindings to `0.0.0.0` or run the stack on a
+shared/cloud host without replacing every credential first.**
+
 The default providers are `fake` (deterministic), so the whole stack runs offline with
 **no API key**. To use a real model:
 

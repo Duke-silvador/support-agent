@@ -1,0 +1,8 @@
+# .env.example: OPENAI_API_KEY= / ANTHROPIC_API_KEY= are intentionally empty placeholders.
+.env.example:generic-api-key:49
+
+# Commit ac7a969: scripts/verify_oidc.py:198 contained a forged `alg=none` JWT
+# test literal (not a real credential). It was replaced with a token generated
+# at runtime, but the old blob remains in git history, so its fingerprint is
+# acknowledged here instead of rewriting the commit.
+ac7a9690cf0fa0365e0d62b51780040f44da7068:scripts/verify_oidc.py:jwt:198
