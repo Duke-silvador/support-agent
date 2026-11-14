@@ -22,7 +22,7 @@
 >   returns `SUP-…`; wire it to the real ITSM (idempotent on `approval.id`).
 > * **Compose credentials are for local testing only** — the Postgres roles
 >   (`support_migrator_local_pw`, `support_app_local_pw`), Redis
->   (`redis_local_pw`), the Keycloak users (`agent-user`, `other-user`,
+>   (`support_redis_local_pw`), the Keycloak users (`agent-user`, `other-user`,
 >   `operator-1` with `*-local-pw` passwords) and `OPERATOR_IDS=operator-1`.
 >   They are published on purpose so the demo runs with one command.
 
@@ -212,9 +212,8 @@ Returns `200` when Postgres and Redis respond, `503` otherwise, plus the active
 | `oidc` | production / local Keycloak | `Authorization: Bearer <JWT>`. Signature is verified against the provider's JWKS, then `iss`, `aud`, `exp`/`nbf`/`iat` (with leeway) and a required `sub`. The user id is the verified `sub`; `X-User-ID` is ignored. |
 
 Algorithm allowlist is fixed to `RS*`/`ES*` (never `HS*`, never `none`). Roles are read
-from Keycloak's `realm_access.roles` (and generic `roles`/`groups`); membership of
-`OIDC_OPERATOR_ROLE` grants operator powers. Rate limiting is keyed on the verified
-subject.
+from Keycloak's `realm_access.roles`; membership of `OIDC_OPERATOR_ROLE` grants operator
+powers. Rate limiting is keyed on the verified subject.
 
 Signing keys come from the issuer's discovery document
 (`<OIDC_ISSUER>/.well-known/openid-configuration`) unless `OIDC_JWKS_URI` is set
@@ -453,10 +452,10 @@ closed in the deployment:
   policy); the application only checks the `OIDC_OPERATOR_ROLE`/`OPERATOR_IDS`
   allowlist.
 * **The demo credentials in `docker-compose.yml` are test-only.** Postgres
-  (`support_migrator_local_pw`, `support_app_local_pw`), Redis (`redis_local_pw`),
-  the Keycloak realm users (`*-local-pw`) and `OPERATOR_IDS=operator-1` exist so the
-  stack starts with one command. Production must inject them from a secret manager
-  and must not reuse these values.
+  (`support_migrator_local_pw`, `support_app_local_pw`), Redis
+  (`support_redis_local_pw`), the Keycloak realm users (`*-local-pw`) and
+  `OPERATOR_IDS=operator-1` exist so the stack starts with one command. Production must
+  inject them from a secret manager and must not reuse these values.
 * **Answer quality was evaluated with `fake` providers only.** The evals prove the
   pipeline contract, not retrieval or answer quality; run them against a real model
   before quoting quality numbers.
